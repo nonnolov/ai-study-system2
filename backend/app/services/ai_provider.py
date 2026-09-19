@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import base64
 import json
 import logging
 import re
@@ -14,6 +15,9 @@ class AIProvider(ABC):
     @abstractmethod
     def generate_mcq(self, topic_name: str, summary: str, evidence: list[str]) -> list[dict]:
         raise NotImplementedError
+
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
+        return ""
 
 
 class MockAIProvider(AIProvider):
@@ -41,6 +45,9 @@ class MockAIProvider(AIProvider):
                 }
             )
         return questions
+
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
+        return ""
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -87,6 +94,36 @@ class OpenAICompatibleProvider(AIProvider):
         except Exception:
             pass
         return MockAIProvider().generate_mcq(topic_name, summary, evidence)
+
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
+        if not settings.ai_api_key or not settings.ai_base_url:
+            return ""
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        prompt = (
+            f"Page {page_number} may contain handwritten content. "
+            "Read only handwritten content that contains meaningful information. Do not transcribe printed/typed text. "
+            "Transcribe the handwriting exactly as written. Preserve English and Thai as accurately as possible. "
+            "Do not summarize, interpret, rewrite, normalize, or invent missing text. Return transcription only."
+        )
+        if retry_reason:
+            prompt += f" Retry reason: {retry_reason}."
+        try:
+            content = self._post_chat(
+                [
+                    {"role": "system", "content": "You transcribe handwriting from page images."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"{prompt}\nPrinted text already extracted:\n{printed_text}"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                        ],
+                    },
+                ],
+                model="gpt-4o-mini",
+            )
+            return content.strip() if content else ""
+        except Exception:
+            return ""
 
 
 def get_ai_provider() -> AIProvider:
