@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
+const apiUrl = (path: string) => `${API}${path.startsWith('/') ? '' : '/'}${path}`;
 
 type DocumentItem = { id: number; title: string; filename: string; status: string };
 type Topic = { id: number; name: string; summary: string };
@@ -31,7 +33,7 @@ export default function Home() {
   const unansweredCount = questions.filter((q) => !answers[q.id]).length;
 
   const loadDocuments = async () => {
-    const res = await fetch(`${API}/documents`);
+    const res = await fetch(apiUrl('/documents'));
     setDocuments(await res.json());
   };
 
@@ -45,9 +47,23 @@ export default function Home() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const uploaded = await fetch(`${API}/documents/upload`, { method: 'POST', body: form }).then((r) => r.json());
-      const processed = await fetch(`${API}/documents/${uploaded.document_id}/process`, { method: 'POST' }).then((r) => r.json());
-      setMessage(`Ready: ${processed.topics_created} topics, ${processed.questions_created} questions`);
+
+      const uploadRes = await fetch(apiUrl('/documents/upload'), { method: 'POST', body: form });
+      if (!uploadRes.ok) {
+        throw new Error(`Upload failed (${uploadRes.status})`);
+      }
+      const uploaded = (await uploadRes.json()) as { document_id?: number };
+      if (!uploaded.document_id) {
+        throw new Error('Upload response missing document_id');
+      }
+
+      const processRes = await fetch(apiUrl(`/documents/${uploaded.document_id}/process`), { method: 'POST' });
+      if (!processRes.ok) {
+        throw new Error(`Processing failed (${processRes.status})`);
+      }
+      const processed = (await processRes.json()) as { topics_created?: number; questions_created?: number };
+
+      setMessage(`Ready: ${processed.topics_created ?? 0} topics, ${processed.questions_created ?? 0} questions`);
       await loadDocuments();
       setSelectedDocument(uploaded.document_id);
       await openQuiz(uploaded.document_id, false);
@@ -64,8 +80,8 @@ export default function Home() {
       setMessage('Loading quiz...');
     }
     const [t, quiz] = await Promise.all([
-      fetch(`${API}/documents/${documentId}/topics`).then((r) => r.json()),
-      fetch(`${API}/documents/${documentId}/quiz`).then((r) => r.json()),
+      fetch(apiUrl(`/documents/${documentId}/topics`)).then((r) => r.json()),
+      fetch(apiUrl(`/documents/${documentId}/quiz`)).then((r) => r.json()),
     ]);
     setTopics(t);
     setQuestions(quiz.questions);
@@ -85,7 +101,7 @@ export default function Home() {
     setBusy(true);
     try {
       const payload = { answers: questions.map((q) => ({ question_id: q.id, selected_answer: answers[q.id] })) };
-      const out = (await fetch(`${API}/quizzes/${attemptId}/submit`, {
+      const out = (await fetch(apiUrl(`/quizzes/${attemptId}/submit`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
