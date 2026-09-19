@@ -66,8 +66,8 @@ export default function Home() {
 
       setMessage(`Ready: ${processed.topics_created ?? 0} topics, ${processed.questions_created ?? 0} questions`);
       await loadDocuments();
-      setSelectedDocument(uploaded.document_id);
-      await openQuiz(uploaded.document_id, false);
+      setSelectedDocument(documentId);
+      await openQuiz(documentId, false);
     } catch {
       setMessage('Upload or processing failed');
     } finally {
