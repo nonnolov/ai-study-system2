@@ -58,6 +58,7 @@ class OpenAICompatibleProvider(AIProvider):
                 "model": model or settings.handwriting_ocr_model,
                 "messages": messages,
                 "temperature": 0.1,
+                "max_tokens": 3000,
             },
             timeout=60,
         )
@@ -97,14 +98,16 @@ class OpenAICompatibleProvider(AIProvider):
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         prompt = (
             f"Page {page_number} may contain handwritten content or annotations. "
-            "Transcribe the handwriting exactly as visible. Preserve English spelling. Preserve Thai characters. "
-            "Do not summarize, normalize, autocorrect, or invent missing text. "
+            "Transcribe the entire visible handwriting exactly as written, preserving reading order. "
+            "Preserve English spelling, Thai characters, line breaks, and visible word boundaries. "
+            "Do not summarize, normalize, autocorrect, translate, or invent missing text. "
             "Ignore printed text already extracted by pypdf. "
-            "Reconstruct obvious broken character spacing only when the visual evidence clearly indicates one word. "
-            "Return only readable study content; use [unclear] when necessary."
+            "Reconstruct broken character spacing only when the visual evidence clearly shows one word. "
+            "If a character cannot be determined, use [unclear]. "
+            "Do not stop early; transcribe the full handwritten sentence or block."
         )
         if retry_reason:
-            prompt += f" Retry reason: {retry_reason}. Be stricter and preserve the full sentence."
+            prompt += f" Retry reason: {retry_reason}. Be stricter, more literal, and complete."
         try:
             logger.info("handwriting_ocr page=%s retry=%s", page_number, bool(retry_reason))
             content = self._post_chat(
