@@ -53,11 +53,12 @@ export default function Home() {
         throw new Error(`Upload failed (${uploadRes.status})`);
       }
       const uploaded = (await uploadRes.json()) as { document_id?: number };
-      if (!uploaded.document_id) {
+      const documentId = uploaded.document_id;
+      if (typeof documentId !== 'number') {
         throw new Error('Upload response missing document_id');
       }
 
-      const processRes = await fetch(apiUrl(`/documents/${uploaded.document_id}/process`), { method: 'POST' });
+      const processRes = await fetch(apiUrl(`/documents/${documentId}/process`), { method: 'POST' });
       if (!processRes.ok) {
         throw new Error(`Processing failed (${processRes.status})`);
       }
