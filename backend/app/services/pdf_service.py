@@ -44,7 +44,7 @@ def _clean_handwriting_text(text: str) -> str:
     lines = []
     last = ""
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = " ".join(raw_line.split()).strip()
         if not line:
             continue
         if line == last:
