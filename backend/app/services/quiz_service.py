@@ -1,27 +1,93 @@
 from collections import defaultdict
 from datetime import datetime
+import re
 
 from sqlalchemy.orm import Session
 
 from app import models
 from app.services.ai_provider import get_ai_provider
 
+MAX_REGEN_ATTEMPTS = 2
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _evidence_chunks(topic: models.Topic) -> list[str]:
+    chunks: list[str] = []
+    if topic.section and topic.section.content:
+        chunks.append(topic.section.content.strip())
+    if topic.summary and topic.summary not in chunks:
+        chunks.append(topic.summary.strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def _extract_question_evidence(evidence: list[str], question_text: str, choices: list[str]) -> str:
+    haystack = "\n".join(evidence)
+    tokens = [token for token in re.findall(r"[A-Za-z0-9]{4,}", question_text) if token.lower() not in {"which", "statement", "best", "matches", "topic"}]
+    tokens.extend(token for choice in choices for token in re.findall(r"[A-Za-z0-9]{4,}", choice))
+    for token in tokens:
+        pattern = re.compile(re.escape(token), re.IGNORECASE)
+        match = pattern.search(haystack)
+        if match:
+            start = max(0, match.start() - 80)
+            end = min(len(haystack), match.end() + 160)
+            return haystack[start:end].strip()
+    return evidence[0][:400] if evidence else ""
+
+
+def _is_supported(question_text: str, choices: list[str], correct_answer: str, source_excerpt: str, evidence: list[str]) -> bool:
+    if not question_text.strip() or len(choices) != 4 or correct_answer not in {"A", "B", "C", "D"}:
+        return False
+    if not source_excerpt.strip() or source_excerpt.strip() not in "\n".join(evidence):
+        return False
+    normalized_evidence = _normalize(" ".join(evidence))
+    normalized_excerpt = _normalize(source_excerpt)
+    if normalized_excerpt not in normalized_evidence:
+        return False
+    return len({choice.strip() for choice in choices if choice.strip()}) == 4
+
 
 def generate_questions(db: Session, document: models.Document) -> int:
     provider = get_ai_provider()
     count = 0
     for topic in document.topics:
-        excerpt = topic.summary
-        generated = provider.generate_mcq(topic.name, topic.summary, excerpt)
+        evidence = _evidence_chunks(topic)
+        if not evidence:
+            continue
+        generated = []
+        attempts = 0
+        while attempts <= MAX_REGEN_ATTEMPTS and len(generated) < 4:
+            attempts += 1
+            candidates = provider.generate_mcq(topic.name, topic.summary, evidence)
+            for item in candidates:
+                question_text = (item.get("question_text") or "").strip()
+                choices = item.get("choices") or []
+                correct_answer = (item.get("correct_answer") or "").strip()
+                explanation = (item.get("explanation") or "").strip()
+                source_excerpt = (item.get("source_excerpt") or "").strip() or _extract_question_evidence(evidence, question_text, choices)
+                if not _is_supported(question_text, choices, correct_answer, source_excerpt, evidence):
+                    continue
+                generated.append(
+                    {
+                        "question_text": question_text,
+                        "choices": choices,
+                        "correct_answer": correct_answer,
+                        "explanation": explanation[:240],
+                        "source_excerpt": source_excerpt,
+                    }
+                )
+                if len(generated) >= 4:
+                    break
+            if len(generated) < 4 and attempts > MAX_REGEN_ATTEMPTS:
+                break
         for item in generated:
-            choices = item["choices"]
-            if len(choices) != 4:
-                continue
             question = models.Question(
                 document_id=document.id,
                 topic_id=topic.id,
                 question_text=item["question_text"],
-                choices_json=choices,
+                choices_json=item["choices"],
                 correct_answer=item["correct_answer"],
                 explanation=item["explanation"],
                 source_excerpt=item["source_excerpt"],
