@@ -1,6 +1,8 @@
 from io import BytesIO
 from pathlib import Path
 import logging
+import re
+from difflib import SequenceMatcher
 
 from PIL import Image
 from pypdf import PdfReader
@@ -25,7 +27,7 @@ def _page_needs_handwriting(page_text: str) -> bool:
     return alpha < 20
 
 
-def _render_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 3.5) -> bytes:
+def _render_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 4.5) -> bytes:
     pdf = pdfium.PdfDocument(str(pdf_path))
     page = pdf[page_index]
     bitmap = page.render(scale=scale).to_pil()
@@ -40,18 +42,55 @@ def _render_page_to_png_bytes(pdf_path: Path, page_index: int, scale: float = 3.
     return buffer.getvalue()
 
 
+def _normalize_spacing(line: str) -> str:
+    line = re.sub(r"(?<=[\u0E00-\u0E7F])\s+(?=[\u0E00-\u0E7F])", "", line)
+    line = re.sub(r"(?<=[A-Za-z])\s+(?=[A-Za-z])", " ", line)
+    line = re.sub(r"\s+", " ", line)
+    return line.strip()
+
+
+def _split_blocks(text: str) -> list[str]:
+    return [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
+
+
+def _dedupe_overlapping_blocks(blocks: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for block in blocks:
+        normalized = _normalize_spacing(block)
+        duplicate = False
+        for existing in cleaned:
+            existing_norm = _normalize_spacing(existing)
+            if normalized == existing_norm:
+                duplicate = True
+                break
+            if normalized in existing_norm or existing_norm in normalized:
+                duplicate = True
+                break
+            if SequenceMatcher(None, normalized, existing_norm).ratio() >= 0.88:
+                duplicate = True
+                break
+        if not duplicate:
+            cleaned.append(block)
+    return cleaned
+
+
 def _clean_handwriting_text(text: str) -> str:
-    lines = []
-    last = ""
-    for raw_line in text.splitlines():
-        line = " ".join(raw_line.split()).strip()
-        if not line:
-            continue
-        if line == last:
-            continue
-        lines.append(line)
-        last = line
-    return "\n".join(lines).strip()
+    blocks = []
+    for block in _split_blocks(text):
+        lines = []
+        last = ""
+        for raw_line in block.splitlines():
+            line = _normalize_spacing(raw_line)
+            if not line:
+                continue
+            if line == last:
+                continue
+            lines.append(line)
+            last = line
+        if lines:
+            blocks.append("\n".join(lines).strip())
+    blocks = _dedupe_overlapping_blocks(blocks)
+    return "\n\n".join(blocks).strip()
 
 
 def _needs_retry(ocr_text: str, page_text: str) -> str | None:
@@ -59,7 +98,7 @@ def _needs_retry(ocr_text: str, page_text: str) -> str | None:
         return "empty_transcription"
     if len(ocr_text.strip()) < 20:
         return "too_short"
-    if len(page_text.strip()) and len(ocr_text.strip()) < max(40, int(len(page_text.strip()) * 0.6)):
+    if len(page_text.strip()) and len(ocr_text.strip()) < max(60, int(len(page_text.strip()) * 0.7)):
         return "possible_truncation"
     return None
 
@@ -81,9 +120,9 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
                 retry_reason = _needs_retry(handwriting_text, extracted)
                 if retry_reason:
                     logger.info("handwriting_ocr_retry page=%s reason=%s", page_number, retry_reason)
-                    retry_bytes = _render_page_to_png_bytes(pdf_path, page_number - 1, scale=4.5)
+                    retry_bytes = _render_page_to_png_bytes(pdf_path, page_number - 1, scale=5.5)
                     retry_text = _clean_handwriting_text(provider.extract_handwriting(retry_bytes, extracted, page_number, retry_reason=retry_reason))
-                    if len(retry_text.strip()) > len(handwriting_text.strip()):
+                    if len(retry_text.strip()) >= len(handwriting_text.strip()):
                         handwriting_text = retry_text
                 if handwriting_text.strip():
                     if extracted.strip() and handwriting_text.strip() == extracted.strip():
