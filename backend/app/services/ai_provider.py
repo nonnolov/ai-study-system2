@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-import base64
 import json
 import logging
 import re
@@ -15,9 +14,6 @@ class AIProvider(ABC):
     @abstractmethod
     def generate_mcq(self, topic_name: str, summary: str, evidence: list[str]) -> list[dict]:
         raise NotImplementedError
-
-    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
-        return ""
 
 
 class MockAIProvider(AIProvider):
@@ -55,7 +51,7 @@ class OpenAICompatibleProvider(AIProvider):
             f"{settings.ai_base_url.rstrip('/')}/v1/chat/completions",
             headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
             json={
-                "model": model or settings.handwriting_ocr_model,
+                "model": model or "gpt-4o-mini",
                 "messages": messages,
                 "temperature": 0.1,
                 "max_tokens": 3000,
@@ -91,41 +87,6 @@ class OpenAICompatibleProvider(AIProvider):
         except Exception:
             pass
         return MockAIProvider().generate_mcq(topic_name, summary, evidence)
-
-    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
-        if not settings.handwriting_ocr_enabled or not settings.ai_api_key or not settings.ai_base_url:
-            return ""
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        prompt = (
-            f"Page {page_number} may contain handwritten content or annotations. "
-            "Transcribe the entire visible handwriting exactly as written, preserving reading order. "
-            "Preserve English spelling, Thai characters, line breaks, and visible word boundaries. "
-            "Do not summarize, normalize, autocorrect, translate, or invent missing text. "
-            "Ignore printed text already extracted by pypdf. "
-            "Reconstruct broken character spacing only when the visual evidence clearly shows one word. "
-            "If a character cannot be determined, use [unclear]. "
-            "Do not stop early; transcribe the full handwritten sentence or block."
-        )
-        if retry_reason:
-            prompt += f" Retry reason: {retry_reason}. Be stricter, more literal, and complete."
-        try:
-            logger.info("handwriting_ocr page=%s retry=%s", page_number, bool(retry_reason))
-            content = self._post_chat(
-                [
-                    {"role": "system", "content": "You extract handwritten study notes from page images."},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"{prompt}\nPrinted text already extracted:\n{printed_text}"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-                        ],
-                    },
-                ],
-                model=settings.handwriting_ocr_model,
-            )
-            return content.strip() if content else ""
-        except Exception:
-            return ""
 
 
 def get_ai_provider() -> AIProvider:
