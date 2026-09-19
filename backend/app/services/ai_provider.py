@@ -1,11 +1,14 @@
 from abc import ABC, abstractmethod
 import base64
 import json
+import logging
 import re
 
 import requests
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class AIProvider(ABC):
@@ -13,7 +16,7 @@ class AIProvider(ABC):
     def generate_mcq(self, topic_name: str, summary: str, evidence: list[str]) -> list[dict]:
         raise NotImplementedError
 
-    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int) -> str:
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
         return ""
 
 
@@ -54,9 +57,9 @@ class OpenAICompatibleProvider(AIProvider):
             json={
                 "model": model or settings.handwriting_ocr_model,
                 "messages": messages,
-                "temperature": 0.2,
+                "temperature": 0.1,
             },
-            timeout=30,
+            timeout=60,
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
@@ -88,17 +91,22 @@ class OpenAICompatibleProvider(AIProvider):
             pass
         return MockAIProvider().generate_mcq(topic_name, summary, evidence)
 
-    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int) -> str:
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int, retry_reason: str | None = None) -> str:
         if not settings.handwriting_ocr_enabled or not settings.ai_api_key or not settings.ai_base_url:
             return ""
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         prompt = (
             f"Page {page_number} may contain handwritten content or annotations. "
-            "Read handwriting and handwritten annotations. Preserve the meaning of the handwriting. "
-            "Extract English text accurately. Ignore printed text that was already extracted by pypdf. "
-            "Return only readable study content. Never invent unreadable text; use [unclear] when necessary."
+            "Transcribe the handwriting exactly as visible. Preserve English spelling. Preserve Thai characters. "
+            "Do not summarize, normalize, autocorrect, or invent missing text. "
+            "Ignore printed text already extracted by pypdf. "
+            "Reconstruct obvious broken character spacing only when the visual evidence clearly indicates one word. "
+            "Return only readable study content; use [unclear] when necessary."
         )
+        if retry_reason:
+            prompt += f" Retry reason: {retry_reason}. Be stricter and preserve the full sentence."
         try:
+            logger.info("handwriting_ocr page=%s retry=%s", page_number, bool(retry_reason))
             content = self._post_chat(
                 [
                     {"role": "system", "content": "You extract handwritten study notes from page images."},
