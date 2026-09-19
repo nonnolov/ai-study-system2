@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     ai_provider: str = "mock"
     ai_api_key: str | None = None
     ai_base_url: str | None = None
+    handwriting_ocr_enabled: bool = False
+    handwriting_ocr_model: str = "gpt-4o-mini"
     frontend_origin: str = "http://localhost:3000"
 
     class Config:

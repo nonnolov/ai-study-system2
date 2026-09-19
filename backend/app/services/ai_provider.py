@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import base64
 import json
 import re
 
@@ -11,6 +12,9 @@ class AIProvider(ABC):
     @abstractmethod
     def generate_mcq(self, topic_name: str, summary: str, evidence: list[str]) -> list[dict]:
         raise NotImplementedError
+
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int) -> str:
+        return ""
 
 
 class MockAIProvider(AIProvider):
@@ -41,6 +45,22 @@ class MockAIProvider(AIProvider):
 
 
 class OpenAICompatibleProvider(AIProvider):
+    def _post_chat(self, messages: list[dict], model: str | None = None) -> str | None:
+        if not settings.ai_api_key or not settings.ai_base_url:
+            return None
+        response = requests.post(
+            f"{settings.ai_base_url.rstrip('/')}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model or settings.handwriting_ocr_model,
+                "messages": messages,
+                "temperature": 0.2,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
     def generate_mcq(self, topic_name: str, summary: str, evidence: list[str]) -> list[dict]:
         if not settings.ai_api_key or not settings.ai_base_url:
             return MockAIProvider().generate_mcq(topic_name, summary, evidence)
@@ -53,27 +73,48 @@ class OpenAICompatibleProvider(AIProvider):
             f"Topic: {topic_name}\nSummary: {summary}\nPDF evidence:\n{evidence_text}"
         )
         try:
-            response = requests.post(
-                f"{settings.ai_base_url.rstrip('/')}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": "You generate grounded study questions using only provided evidence."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.2,
-                },
-                timeout=30,
+            content = self._post_chat(
+                [
+                    {"role": "system", "content": "You generate grounded study questions using only provided evidence."},
+                    {"role": "user", "content": prompt},
+                ],
+                model="gpt-4o-mini",
             )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            if isinstance(data, list):
-                return data
+            if content:
+                data = json.loads(content)
+                if isinstance(data, list):
+                    return data
         except Exception:
             pass
         return MockAIProvider().generate_mcq(topic_name, summary, evidence)
+
+    def extract_handwriting(self, image_bytes: bytes, printed_text: str, page_number: int) -> str:
+        if not settings.handwriting_ocr_enabled or not settings.ai_api_key or not settings.ai_base_url:
+            return ""
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        prompt = (
+            f"Page {page_number} may contain handwritten content or annotations. "
+            "Read handwriting and handwritten annotations. Preserve the meaning of the handwriting. "
+            "Extract English text accurately. Ignore printed text that was already extracted by pypdf. "
+            "Return only readable study content. Never invent unreadable text; use [unclear] when necessary."
+        )
+        try:
+            content = self._post_chat(
+                [
+                    {"role": "system", "content": "You extract handwritten study notes from page images."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"{prompt}\nPrinted text already extracted:\n{printed_text}"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                        ],
+                    },
+                ],
+                model=settings.handwriting_ocr_model,
+            )
+            return content.strip() if content else ""
+        except Exception:
+            return ""
 
 
 def get_ai_provider() -> AIProvider:
